@@ -6,7 +6,7 @@ const novaDoxABI = require('../NOVA_DOX.json');
 
 //Network Configurations
 const MNEMONIC = process.env.MNEMONIC
-const NETWORK = process.env.NETWORK || 'rinkeby'
+const NETWORK = process.env.NETWORK || 'goerli'
 const INFURA_KEY = process.env.INFURA_KEY
 const METAMASK_ACCOUNT_INDEX = process.env.METAMASK_ACCOUNT_INDEX || 0
 
@@ -25,8 +25,9 @@ const SHARE_PERCENT_SOFTWARE_PAYMENT = Number(process.env.SHARE_PERCENT_SOFTWARE
 const SHARE_PERCENT_MARKETING = Number(process.env.SHARE_PERCENT_MARKETING) || 10
 const SHARE_PERCENT_BUSINESS_MODEL = Number(process.env.SHARE_PERCENT_BUSINESS_MODEL) || 10
 
-//other 
+// other
 const EMPTY_ADDRESS = '0x0000000000000000000000000000000000000000'
+// Keccak256 hash value of transfer function signature
 const NFT_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
 
@@ -34,6 +35,7 @@ if (!MNEMONIC || !INFURA_KEY) {
     console.error("Please set a valid MNEMONIC and INFURA_KEY") 
 }
 
+// Create a provider to interact with smart contract
 const provider = new HDWalletProvider({
     mnemonic: MNEMONIC,
     providerOrUrl: 'https://' + NETWORK + '.infura.io/v3/' + INFURA_KEY,
@@ -41,16 +43,18 @@ const provider = new HDWalletProvider({
     chainId : 4
 });
 
+// Use the provider in web3
 const web3 = new Web3(provider);
 
+// Get the account address from the metamask wallet. This will be the sender address
 const senderAccount = provider.getAddress(METAMASK_ACCOUNT_INDEX)
 console.log("Sender address:", senderAccount)
 
 function addAddressAndShares(paymentAddress, individualSharePercentage) {
-    paymentAddress.add(CHARITY_WALLET_ADDRESS)
-    paymentAddress.add(SOFTWARE_PAYMENT_ADDRESS)
-    paymentAddress.add(MARKETING_ADDRESS)
-    paymentAddress.add(BUSINESS_MODEL_ADDRESS)
+    paymentAddress.push(CHARITY_WALLET_ADDRESS)
+    paymentAddress.push(SOFTWARE_PAYMENT_ADDRESS)
+    paymentAddress.push(MARKETING_ADDRESS)
+    paymentAddress.push(BUSINESS_MODEL_ADDRESS)
 
     individualSharePercentage.push(SHARE_PERCENT_CHARITY_WALLET*100)
     individualSharePercentage.push(SHARE_PERCENT_SOFTWARE_PAYMENT*100)
@@ -92,32 +96,38 @@ async function estimateGas(method) {
 async function processData(response) {
     //An array of price list of NFTs bought by the NFT owners
     var NFTSales = []   
-    var tokenOwner = new Map()
-    var tokenTranx= new Map()
-    let sumOfEther = 0; 
+    var tokenOwner = new Map()  // Mapping between TokenId and NFTOwner
+    var tokenTranx= new Map()   // Mapping between TokenId and Transaction hash
+    let sumOfEther = 0;        //  Variable to calculate the total ethers of all NFT
     try {
+        // Iterate through all the data and filter it step by step
         for( var i = 0; i < response.length; i++ ) {
             var tx = response[i];
+            // Filter data whose from address is not empty(If empty, it means it was minted)
             if (tx.returnValues.from != EMPTY_ADDRESS && tx.raw.topics[0] == NFT_TRANSFER_TOPIC) {
+                // topics[3] represents the tokenId
                 tokenTranx.set(tx.raw.topics[3], tx.transactionHash);
-                tokenOwner.set(tx.raw.topics[3],tx.returnValues.to);
+                tokenOwner.set(tx.raw.topics[3], tx.returnValues.to);
             }   
         }
 
+        // Iterate through the transaction hash and get the NFT value in that transaction
         for (var txTopic of Array.from(tokenTranx.keys())) {
             let response = await web3.eth.getTransaction(tokenTranx.get(txTopic))
+            // convert the value of each NFT to Big Number
             let ether = web3.utils.toBN(response.value)
             NFTSales[tokenOwner.get(txTopic)] = NFTSales[tokenOwner.get(txTopic)] ? NFTSales[tokenOwner.get(txTopic)].add(ether) : ether
             sumOfEther = sumOfEther ? sumOfEther.add(ether) : ether
         }
-        var NFTOwnerAddress = new Set(Array.from(tokenOwner.values())); 
+        var NFTOwnerAddress = new Set(Array.from(tokenOwner.values()));  // Holds the a set of address of all NFT owners
     } catch(err) {
         provider.engine.stop();
         console.error(err);
     }
 
-    var sharePercentage = []
-    var individualSharePercentage = 0;
+    var sharePercentage = []       // An array that holds all the shares in %
+    var individualSharePercentage = 0; // Individual share %
+    // loop through the array of NFT owners and calculate the share % for each address
     for (var owner of NFTOwnerAddress) {
         //Multiply and divide by 1e18 to avoid rounding error
         individualSharePercentage = Number((((NFTSales[owner] * 1e18 / (sumOfEther)) * 100 * (SHARE_PERCENT_NFT_HOLDERS * 100 / 100))/1e20).toFixed(2));
@@ -131,7 +141,7 @@ async function processData(response) {
     console.log("totalPercentage", Number(sharePercentage.reduce((a, b) => a + b, 0)/100))
     
     return {
-        'Owners': NFTOwnerAddress,
+        'Owners': Array.from(NFTOwnerAddress),
         'Share': sharePercentage
     };
 }
@@ -139,6 +149,7 @@ async function processData(response) {
 async function fetchNFTData() {
     try {
         var instance = new web3.eth.Contract(novaDoxABI, NFT_CONTRACT_ADDRESS);
+        // get all Transfer events of the NFT contract
         let response = await instance.getPastEvents('Transfer', {
             fromBlock: 0,
             toBlock: 'latest'
@@ -161,15 +172,18 @@ async function main() {
         console.log("Owners", processedData.Owners)
         console.log("Shares", processedData.Share)
         
+        // Get an instance to the Payment splitter smart contract
         var contractInstance = initializeContract()
         var tx = await contractInstance.methods.getBalance().call({ from: senderAccount });
         console.log("The totalSupply is: ", tx)
 
+        // Invoke the addRecipients function of the smart contract
         let estimatedGas = await estimateGas(contractInstance.methods.addRecipients(processedData.Owners, processedData.Share));
         tx = await contractInstance.methods.addRecipients(processedData.Owners, processedData.Share).send({ from: senderAccount, gas : estimatedGas });
         console.log("TransactionHash of addRecipients",tx.transactionHash)
 
         await sleep(4000)
+        // Invoke the payRecipients function of the smart contract
         estimatedGas = await estimateGas(contractInstance.methods.payRecipients());
         tx = await contractInstance.methods.payRecipients().send({ from: senderAccount, gas : estimatedGas });
         console.log("TransactionHash of payRecipients",tx.transactionHash)
